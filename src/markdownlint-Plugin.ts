@@ -202,7 +202,6 @@ export class MarkdownlintPlugin extends Plugin {
             handleRuleFailures: true,
         };
         const lintResult = lint(options);
-        console.log("👀 LP Lint results", `\n${lintResult.toString()}`);
         return lintResult[name];
     }
 
