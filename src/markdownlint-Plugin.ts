@@ -12,6 +12,7 @@ import { lint } from "markdownlint/sync";
 import {
     type App,
     editorInfoField,
+    MarkdownView,
     Plugin,
     PluginSettingTab,
     parseYaml,
@@ -129,21 +130,24 @@ export class MarkdownlintPlugin extends Plugin {
         this.originalSaveCallback = saveCommandDefinition?.checkCallback;
 
         saveCommandDefinition.checkCallback = (checking: boolean) => {
-            if (checking) {
+            if (checking) return this.originalSaveCallback(checking);
+
+            if (!this.settings.lintOnSave)
                 return this.originalSaveCallback(checking);
-            } else {
-                this.originalSaveCallback(checking);
 
-                if (this.settings.lintOnSave) {
-                    const file = this.app.workspace.getActiveFile();
-                    if (!file) return;
+            const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+            if (!view?.file) return this.originalSaveCallback(checking);
 
-                    this.app.vault.process(file, (content) => {
-                        const results = this.doLint(file.name, content);
-                        return this.doFixes(content, results);
-                    });
-                }
+            // Apply fixes and save
+            const currentContent = view.editor.getValue();
+            const results = this.doLint(view.file.name, currentContent);
+            const fixedContent = this.doFixes(currentContent, results);
+
+            if (fixedContent !== currentContent) {
+                view.editor.setValue(fixedContent);
             }
+
+            return this.originalSaveCallback(checking);
         };
 
         // TODO: commands:
