@@ -1,5 +1,6 @@
 import { type Diagnostic, type LintSource, linter } from "@codemirror/lint";
-import type { Extension } from "@codemirror/state";
+import type { ChangeSpec, Extension } from "@codemirror/state";
+import DiffMatchPatch from "diff-match-patch";
 import {
     applyFix,
     applyFixes,
@@ -11,6 +12,7 @@ import {
 import { lint } from "markdownlint/sync";
 import {
     type App,
+    type Editor,
     editorInfoField,
     MarkdownView,
     Plugin,
@@ -124,7 +126,6 @@ export class MarkdownlintPlugin extends Plugin {
         });
 
         const saveCommandDefinition =
-            // @ts-expect-error
             this.app.commands?.commands?.["editor:save-file"];
 
         this.originalSaveCallback = saveCommandDefinition?.checkCallback;
@@ -132,19 +133,15 @@ export class MarkdownlintPlugin extends Plugin {
         saveCommandDefinition.checkCallback = (checking: boolean) => {
             if (checking) return this.originalSaveCallback(checking);
 
-            if (!this.settings.lintOnSave)
-                return this.originalSaveCallback(checking);
+            if (this.settings.lintOnSave) {
+                const view =
+                    this.app.workspace.getActiveViewOfType(MarkdownView);
 
-            const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-            if (!view?.file) return this.originalSaveCallback(checking);
+                const oldContent = view.editor.getValue();
+                const results = this.doLint(view.file.name, oldContent);
+                const newContent = this.doFixes(oldContent, results);
 
-            // Apply fixes and save
-            const currentContent = view.editor.getValue();
-            const results = this.doLint(view.file.name, currentContent);
-            const fixedContent = this.doFixes(currentContent, results);
-
-            if (fixedContent !== currentContent) {
-                view.editor.setValue(fixedContent);
+                this.updateEditor(oldContent, newContent, view.editor);
             }
 
             return this.originalSaveCallback(checking);
@@ -158,7 +155,6 @@ export class MarkdownlintPlugin extends Plugin {
         this.cmExtension.length = 0;
 
         const saveCommandDefinition =
-            // @ts-expect-error
             this.app.commands?.commands?.["editor:save-file"];
 
         if (saveCommandDefinition?.checkCallback && this.originalSaveCallback) {
@@ -298,6 +294,65 @@ export class MarkdownlintPlugin extends Plugin {
 
         return diagnostics;
     };
+
+    // Based on https://github.com/platers/obsidian-linter/blob/master/src/main.ts#L857
+    //
+    // vault.process doesn't work while a requestSave event is being debounced.
+    // That's why we apply the changes using cm.dispatch instead.
+    //
+    // See: https://forum.obsidian.md/t/vault-process-and-vault-modify-dont-work-when-there-is-a-requestsave-debounce-event/107862
+    private updateEditor(
+        oldText: string,
+        newText: string,
+        editor: Editor,
+    ): DiffMatchPatch.Diff[] {
+        const dmp = new DiffMatchPatch.diff_match_patch();
+        const changes = dmp.diff_main(oldText, newText);
+
+        let curText = "";
+        changes.forEach((change) => {
+            const [type, value] = change;
+
+            if (type === DiffMatchPatch.DIFF_INSERT) {
+                editor.cm.dispatch({
+                    changes: [
+                        {
+                            from: editor.posToOffset(
+                                this.endOfDocument(curText),
+                            ),
+                            insert: value,
+                        } as ChangeSpec,
+                    ],
+                    filter: false,
+                });
+                curText += value;
+            } else if (type === DiffMatchPatch.DIFF_DELETE) {
+                const start = this.endOfDocument(curText);
+                let tempText = curText;
+                tempText += value;
+                const end = this.endOfDocument(tempText);
+                editor.cm.dispatch({
+                    changes: [
+                        {
+                            from: editor.posToOffset(start),
+                            to: editor.posToOffset(end),
+                            insert: "",
+                        } as ChangeSpec,
+                    ],
+                    filter: false,
+                });
+            } else {
+                curText += value;
+            }
+        });
+
+        return changes;
+    }
+
+    private endOfDocument(doc: string) {
+        const lines = doc.split("\n");
+        return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+    }
 }
 
 class SettingTab extends PluginSettingTab {
