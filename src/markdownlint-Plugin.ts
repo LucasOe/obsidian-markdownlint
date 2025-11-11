@@ -12,7 +12,6 @@ import { lint } from "markdownlint/sync";
 import {
     type App,
     editorInfoField,
-    MarkdownView,
     Plugin,
     PluginSettingTab,
     parseYaml,
