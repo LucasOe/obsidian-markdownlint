@@ -9,9 +9,29 @@ import {
     type Options,
 } from "markdownlint";
 import { lint } from "markdownlint/sync";
-import { editorInfoField, Plugin, parseYaml } from "obsidian";
+import {
+    type App,
+    editorInfoField,
+    MarkdownView,
+    Plugin,
+    PluginSettingTab,
+    parseYaml,
+    Setting,
+} from "obsidian";
+
+interface PluginSettings {
+    showDiagnostics: boolean;
+    lintOnSave: boolean;
+}
+
+const DEFAULT_SETTINGS: PluginSettings = {
+    showDiagnostics: true,
+    lintOnSave: false,
+};
 
 export class MarkdownlintPlugin extends Plugin {
+    public settings: PluginSettings;
+
     /** CodeMirror 6 extensions. Tracked via array to allow for dynamic updates. */
     private cmExtension: Extension[] = [];
 
@@ -59,11 +79,17 @@ export class MarkdownlintPlugin extends Plugin {
         MD042: false,
     };
 
+    private originalSaveCallback?: (checking: boolean) => boolean | undefined =
+        null;
+
     async onload(): Promise<void> {
         console.info(
             `loading Markdownlint v${this.manifest.version}`,
             `using markdownlint v${getVersion()}`,
         );
+
+        await this.loadSettings();
+        this.addSettingTab(new SettingTab(this.app, this));
 
         this.registerEditorExtension(this.cmExtension);
         this.cmExtension.push(
@@ -97,12 +123,56 @@ export class MarkdownlintPlugin extends Plugin {
             },
         });
 
+        const saveCommandDefinition =
+            // @ts-expect-error
+            this.app.commands?.commands?.["editor:save-file"];
+
+        this.originalSaveCallback = saveCommandDefinition?.checkCallback;
+
+        saveCommandDefinition.checkCallback = (checking: boolean) => {
+            if (checking) {
+                return this.originalSaveCallback(checking);
+            } else {
+                this.originalSaveCallback(checking);
+
+                if (this.settings.lintOnSave) {
+                    const file = this.app.workspace.getActiveFile();
+                    if (!file) return;
+
+                    this.app.vault.process(file, (content) => {
+                        const results = this.doLint(file.name, content);
+                        return this.doFixes(content, results);
+                    });
+                }
+            }
+        };
+
         // TODO: commands:
         // - provide default config file (setting)
     }
 
     async onunload(): Promise<void> {
         this.cmExtension.length = 0;
+
+        const saveCommandDefinition =
+            // @ts-expect-error
+            this.app.commands?.commands?.["editor:save-file"];
+
+        if (saveCommandDefinition?.checkCallback && this.originalSaveCallback) {
+            saveCommandDefinition.checkCallback = this.originalSaveCallback;
+        }
+    }
+
+    async loadSettings() {
+        this.settings = Object.assign(
+            {},
+            DEFAULT_SETTINGS,
+            await this.loadData(),
+        );
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
     }
 
     async findConfig(): Promise<void> {
@@ -149,7 +219,7 @@ export class MarkdownlintPlugin extends Plugin {
 
     // Hook into CodeMirror lint support
     lintSource: LintSource = async (editorView) => {
-        if (!this.config) {
+        if (!this.config || !this.settings.showDiagnostics) {
             return;
         }
         const info = editorView.state.field(editorInfoField);
@@ -226,4 +296,42 @@ export class MarkdownlintPlugin extends Plugin {
 
         return diagnostics;
     };
+}
+
+class SettingTab extends PluginSettingTab {
+    plugin: MarkdownlintPlugin;
+
+    constructor(app: App, plugin: MarkdownlintPlugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display(): void {
+        const { containerEl } = this;
+        containerEl.empty();
+
+        new Setting(containerEl) //
+            .setName("Show Diagnostics")
+            .addToggle((toggle) =>
+                toggle //
+                    .setValue(this.plugin.settings.showDiagnostics)
+                    .onChange((value) => {
+                        this.plugin.settings.showDiagnostics = value;
+                        this.plugin.saveSettings();
+                        this.display();
+                    }),
+            );
+
+        new Setting(containerEl) //
+            .setName("Lint on Save")
+            .addToggle((toggle) =>
+                toggle //
+                    .setValue(this.plugin.settings.lintOnSave)
+                    .onChange((value) => {
+                        this.plugin.settings.lintOnSave = value;
+                        this.plugin.saveSettings();
+                        this.display();
+                    }),
+            );
+    }
 }
